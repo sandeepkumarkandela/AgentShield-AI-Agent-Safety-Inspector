@@ -1,0 +1,368 @@
+import { describe, it, expect } from "vitest";
+import { renderJsonReport, renderMarkdownReport } from "../../src/reporter/json.js";
+import type { SecurityReport } from "../../src/types.js";
+
+function makeReport(overrides: Partial<SecurityReport> = {}): SecurityReport {
+  return {
+    timestamp: "2026-02-11T00:00:00.000Z",
+    targetPath: "/tmp/test",
+    findings: [],
+    score: {
+      grade: "B",
+      numericScore: 80,
+      breakdown: { secrets: 100, permissions: 80, hooks: 70, mcp: 90, agents: 60 },
+    },
+    summary: {
+      totalFindings: 0,
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+      info: 0,
+      filesScanned: 5,
+      autoFixable: 0,
+    },
+    ...overrides,
+  };
+}
+
+function makeHarnessAdapters(): NonNullable<SecurityReport["harnessAdapters"]> {
+  return {
+    totalRegistered: 7,
+    totalMatched: 2,
+    matched: [
+      {
+        id: "claude-code",
+        name: "Claude Code",
+        description: "Claude config",
+        configPaths: ["CLAUDE.md"],
+        permissionConcepts: ["allow/deny permissions"],
+        pluginSurfaces: ["hooks"],
+        mcpConventions: ["mcpServers"],
+        historySurfaces: ["transcripts"],
+        ciEvidence: ["scan report"],
+        matched: true,
+        confidence: "strong",
+        evidence: ["CLAUDE.md", ".claude/settings.json"],
+      },
+      {
+        id: "codex",
+        name: "Codex",
+        description: "Codex config",
+        configPaths: ["AGENTS.md"],
+        permissionConcepts: ["sandbox policy"],
+        pluginSurfaces: ["skills"],
+        mcpConventions: [".codex/config.toml"],
+        historySurfaces: ["rollouts"],
+        ciEvidence: ["policy gate"],
+        matched: true,
+        confidence: "strong",
+        evidence: ["AGENTS.md"],
+      },
+    ],
+    registered: [],
+  };
+}
+
+describe("renderJsonReport", () => {
+  it("returns valid JSON", () => {
+    const output = renderJsonReport(makeReport());
+    const parsed = JSON.parse(output);
+    expect(parsed.targetPath).toBe("/tmp/test");
+  });
+
+  it("includes all report fields", () => {
+    const output = renderJsonReport(makeReport());
+    const parsed = JSON.parse(output);
+    expect(parsed).toHaveProperty("timestamp");
+    expect(parsed).toHaveProperty("targetPath");
+    expect(parsed).toHaveProperty("findings");
+    expect(parsed).toHaveProperty("score");
+    expect(parsed).toHaveProperty("summary");
+  });
+
+  it("preserves harness adapter evidence in JSON output", () => {
+    const parsed = JSON.parse(renderJsonReport(makeReport({
+      harnessAdapters: makeHarnessAdapters(),
+    })));
+
+    expect(parsed.harnessAdapters.totalMatched).toBe(2);
+    expect(parsed.harnessAdapters.matched[0].id).toBe("claude-code");
+    expect(parsed.harnessAdapters.matched[0].evidence).toContain(".claude/settings.json");
+  });
+
+  it("preserves findings in output", () => {
+    const report = makeReport({
+      findings: [
+        {
+          id: "TEST-001",
+          severity: "high",
+          category: "secrets",
+          title: "Test finding",
+          description: "A test",
+          file: "test.md",
+          runtimeConfidence: "template-example",
+        },
+      ],
+      summary: {
+        totalFindings: 1,
+        critical: 0,
+        high: 1,
+        medium: 0,
+        low: 0,
+        info: 0,
+        filesScanned: 1,
+        autoFixable: 0,
+      },
+    });
+    const parsed = JSON.parse(renderJsonReport(report));
+    expect(parsed.findings).toHaveLength(1);
+    expect(parsed.findings[0].title).toBe("Test finding");
+    expect(parsed.findings[0].runtimeConfidence).toBe("template-example");
+  });
+
+  it("preserves new source-kind confidence values in output", () => {
+    const report = makeReport({
+      findings: [
+        {
+          id: "TEST-002",
+          severity: "info",
+          category: "hooks",
+          title: "Hook code source",
+          description: "A test",
+          file: "scripts/hooks/session-start.js",
+          runtimeConfidence: "hook-code",
+        },
+      ],
+      summary: {
+        totalFindings: 1,
+        critical: 0,
+        high: 0,
+        medium: 0,
+        low: 0,
+        info: 1,
+        filesScanned: 1,
+        autoFixable: 0,
+      },
+    });
+    const parsed = JSON.parse(renderJsonReport(report));
+    expect(parsed.findings[0].runtimeConfidence).toBe("hook-code");
+  });
+});
+
+describe("renderMarkdownReport", () => {
+  it("starts with markdown heading", () => {
+    const output = renderMarkdownReport(makeReport());
+    expect(output).toContain("# AgentShield Security Report");
+  });
+
+  it("includes grade and score", () => {
+    const output = renderMarkdownReport(makeReport());
+    expect(output).toContain("**Grade:** B (80/100)");
+  });
+
+  it("includes summary table", () => {
+    const output = renderMarkdownReport(makeReport());
+    expect(output).toContain("## Summary");
+    expect(output).toContain("| Files scanned | 5 |");
+  });
+
+  it("renders harness adapter summary in markdown", () => {
+    const output = renderMarkdownReport(makeReport({
+      harnessAdapters: makeHarnessAdapters(),
+    }));
+
+    expect(output).toContain("## Harness Adapters");
+    expect(output).toContain("Matched 2/7 registered adapters.");
+    expect(output).toContain("| Claude Code | strong | `CLAUDE.md`, `.claude/settings.json` |");
+  });
+
+  it("includes score breakdown table", () => {
+    const output = renderMarkdownReport(makeReport());
+    expect(output).toContain("## Score Breakdown");
+    expect(output).toContain("| Secrets | 100/100 |");
+    expect(output).toContain("| Hooks | 70/100 |");
+  });
+
+  it("shows no issues message when empty", () => {
+    const output = renderMarkdownReport(makeReport());
+    expect(output).toContain("No Issues Found");
+  });
+
+  it("renders findings with severity emoji", () => {
+    const report = makeReport({
+      findings: [
+        {
+          id: "SEC-001",
+          severity: "critical",
+          category: "secrets",
+          title: "Hardcoded key",
+          description: "Found a key",
+          file: "CLAUDE.md",
+          runtimeConfidence: "active-runtime",
+          line: 10,
+          evidence: "sk-***",
+          fix: { description: "Use env var", before: "sk-xxx", after: "${KEY}", auto: true },
+        },
+      ],
+      summary: {
+        totalFindings: 1,
+        critical: 1,
+        high: 0,
+        medium: 0,
+        low: 0,
+        info: 0,
+        filesScanned: 1,
+        autoFixable: 1,
+      },
+    });
+    const output = renderMarkdownReport(report);
+    expect(output).toContain("Hardcoded key");
+    expect(output).toContain("**Severity:** critical");
+    expect(output).toContain("**Runtime Confidence:** active runtime");
+    expect(output).toContain("**Evidence:** `sk-***`");
+    expect(output).toContain("**Auto-fixable:** Yes");
+    expect(output).toContain("`CLAUDE.md:10`");
+  });
+
+  it("renders skill health metrics and fallback score labels", () => {
+    const output = renderMarkdownReport(makeReport({
+      score: {
+        grade: "A",
+        numericScore: 94,
+        breakdown: {
+          secrets: 100,
+          permissions: 96,
+          hooks: 91,
+          custom: 77,
+        },
+      },
+      skillHealth: {
+        totalSkills: 4,
+        instrumentedSkills: 3,
+        versionedSkills: 2,
+        rollbackReadySkills: 1,
+        observedSkills: 3,
+        averageScore: 88,
+      },
+    }));
+
+    expect(output).toContain("## Skill Health");
+    expect(output).toContain("| Skills discovered | 4 |");
+    expect(output).toContain("| Average health score | 88/100 |");
+    expect(output).toContain("| custom | 77/100 |");
+  });
+
+  it("formats additional runtime confidence labels", () => {
+    const output = renderMarkdownReport(makeReport({
+      findings: [
+        {
+          id: "RC-1",
+          severity: "high",
+          category: "hooks",
+          title: "Optional local project hook",
+          description: "A test",
+          file: "hooks/local.sh",
+          runtimeConfidence: "project-local-optional",
+        },
+        {
+          id: "RC-2",
+          severity: "medium",
+          category: "agents",
+          title: "Docs example role",
+          description: "A test",
+          file: "docs/example.md",
+          runtimeConfidence: "docs-example",
+        },
+        {
+          id: "RC-3",
+          severity: "low",
+          category: "mcp",
+          title: "Plugin manifest source",
+          description: "A test",
+          file: "plugin.json",
+          runtimeConfidence: "plugin-manifest",
+        },
+        {
+          id: "RC-4",
+          severity: "low",
+          category: "agents",
+          title: "Plugin cache source",
+          description: "A test",
+          file: ".claude/plugins/cache/demo/agent.md",
+          runtimeConfidence: "plugin-cache",
+        },
+        {
+          id: "RC-5",
+          severity: "info",
+          category: "agents",
+          title: "Unknown confidence source",
+          description: "A test",
+          file: "agent.md",
+          runtimeConfidence: "custom-confidence",
+        },
+      ],
+      summary: {
+        totalFindings: 5,
+        critical: 0,
+        high: 1,
+        medium: 1,
+        low: 2,
+        info: 1,
+        filesScanned: 5,
+        autoFixable: 0,
+      },
+    }));
+
+    expect(output).toContain("project-local optional");
+    expect(output).toContain("docs/example");
+    expect(output).toContain("plugin manifest");
+    expect(output).toContain("plugin cache");
+    expect(output).toContain("custom-confidence");
+  });
+
+  it("renders high, medium, and low severity emojis", () => {
+    const output = renderMarkdownReport(makeReport({
+      findings: [
+        {
+          id: "EMOJI-1",
+          severity: "high",
+          category: "secrets",
+          title: "High severity finding",
+          description: "A test",
+          file: "high.md",
+        },
+        {
+          id: "EMOJI-2",
+          severity: "medium",
+          category: "hooks",
+          title: "Medium severity finding",
+          description: "A test",
+          file: "medium.md",
+        },
+        {
+          id: "EMOJI-3",
+          severity: "low",
+          category: "mcp",
+          title: "Low severity finding",
+          description: "A test",
+          file: "low.md",
+        },
+      ],
+      summary: {
+        totalFindings: 3,
+        critical: 0,
+        high: 1,
+        medium: 1,
+        low: 1,
+        info: 0,
+        filesScanned: 3,
+        autoFixable: 0,
+      },
+    }));
+
+    expect(output).toContain("### 🟡 High severity finding");
+    expect(output).toContain("### 🔵 Medium severity finding");
+    expect(output).toContain("### ⚪ Low severity finding");
+  });
+});
